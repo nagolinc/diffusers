@@ -14,7 +14,7 @@ from transformers import CLIPFeatureExtractor, CLIPTextModel, CLIPTokenizer
 def preprocess_image(image):
     w, h = image.size
     w, h = map(lambda x: x - x % 32, (w, h))  # resize to integer multiple of 32
-    image = image.resize((w, h), resample=PIL.Image.LANCZOS)
+    image = image.resize((w, h), resample=PIL.Image.Resampling.LANCZOS)
     image = np.array(image).astype(np.float32) / 255.0
     image = image[None].transpose(0, 3, 1, 2)
     image = torch.from_numpy(image)
@@ -25,7 +25,7 @@ def preprocess_mask(mask):
     mask = mask.convert("L")
     w, h = mask.size
     w, h = map(lambda x: x - x % 32, (w, h))  # resize to integer multiple of 32
-    mask = mask.resize((w // 8, h // 8), resample=PIL.Image.NEAREST)
+    mask = mask.resize((w // 8, h // 8), resample=PIL.Image.Resampling.NEAREST)
     mask = np.array(mask).astype(np.float32) / 255.0
     mask = np.tile(mask, (4, 1, 1))
     mask = mask[None].transpose(0, 1, 2, 3)  # what does this step do?
@@ -91,24 +91,35 @@ class StableDiffusionInpaintingPipeline(DiffusionPipeline):
 
         self.scheduler.set_timesteps(num_inference_steps, **extra_set_kwargs)
 
+        # preprocess mask
+        mask = preprocess_mask(mask_image).to(self.device)
+        mask = torch.cat([mask] * batch_size)
+
         # preprocess image
         init_image = preprocess_image(init_image).to(self.device)
 
         # encode the init image into latents and scale the latents
         init_latents = self.vae.encode(init_image).sample()
+
+        #make extra sure we add noise to masked areas
+        rand_latents = torch.randn(
+                init_latents.shape,
+                generator=generator,
+                device=self.device,
+            )
+        init_latents_noised=init_latents*(mask)+rand_latents*(1-mask)
+        init_latents=init_latents*(1-strength)+init_latents_noised*strength
+
+
         init_latents = 0.18215 * init_latents
 
         # prepare init_latents noise to latents
         init_latents = torch.cat([init_latents] * batch_size)
         init_latents_orig = init_latents
 
-        # preprocess mask
-        mask = preprocess_mask(mask_image).to(self.device)
-        mask = torch.cat([mask] * batch_size)
-
         # check sizes
         if not mask.shape == init_latents.shape:
-            raise ValueError(f"The mask and init_image should be the same size!")
+            raise ValueError("The mask and init_image should be the same size!")
 
         # get the original timestep using init_timestep
         init_timestep = int(num_inference_steps * strength) + offset
@@ -174,7 +185,7 @@ class StableDiffusionInpaintingPipeline(DiffusionPipeline):
             latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs)["prev_sample"]
 
             # masking
-            init_latents_proper = self.scheduler.add_noise(init_latents_orig, noise, t)
+            init_latents_proper = self.scheduler.add_noise(init_latents_orig, noise, t-1)
             latents = (init_latents_proper * mask) + (latents * (1 - mask))
 
         # scale and decode the image latents with vae
