@@ -184,9 +184,13 @@ class StableDiffusionInpaintingPipeline(DiffusionPipeline):
             # compute the previous noisy sample x_t -> x_t-1
             latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs)["prev_sample"]
 
-            # masking
-            init_latents_proper = self.scheduler.add_noise(init_latents_orig, noise, t-1)
-            latents = (init_latents_proper * mask) + (latents * (1 - mask))
+            #masking
+            if t > 1:
+                t_noise = torch.randn(latents.shape, generator=generator, device=self.device)
+                init_latents_proper = self.scheduler.add_noise(init_latents_orig, t_noise, t-1)
+                latents = init_latents_proper * mask    +    latents * (1-mask)
+            else:
+                latents = init_latents_orig * mask    +    latents * (1-mask)
 
         # scale and decode the image latents with vae
         latents = 1 / 0.18215 * latents
